@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>aps_forma_pdf_esign</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Autodesk.Authentication" Version="2.0.1" />
+    <PackageReference Include="Autodesk.DataManagement" Version="2.1.3" />
+    <PackageReference Include="Autodesk.Oss" Version="2.3.4" />
+  </ItemGroup>
+
+</Project>
