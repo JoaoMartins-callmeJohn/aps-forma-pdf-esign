@@ -5,6 +5,12 @@ Sample to connect PDFs from Forma (Autodesk Construction Cloud) with e-sign solu
 ![platforms](https://img.shields.io/badge/platform-windows%20%7C%20osx%20%7C%20linux-lightgray.svg)
 [![.net](https://img.shields.io/badge/net-10.0-blue.svg)](https://dotnet.microsoft.com)
 
+## Demo
+
+| Adobe Acrobat Sign | Docusign |
+|---|---|
+| [![Adobe Acrobat Sign demo](https://img.youtube.com/vi/HTeqlHZEr0s/0.jpg)](https://www.youtube.com/watch?v=HTeqlHZEr0s) | [![Docusign demo](https://img.youtube.com/vi/ChcsIIVFjtA/0.jpg)](https://www.youtube.com/watch?v=ChcsIIVFjtA) |
+
 ## What it does
 
 1. Signs you in with your Autodesk account and lets you browse hubs, projects and folders. This part is based on [aps-hubs-browser-dotnet](https://github.com/autodesk-platform-services/aps-hubs-browser-dotnet).
