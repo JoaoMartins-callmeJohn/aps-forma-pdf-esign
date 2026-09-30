@@ -13,6 +13,7 @@ public class SignRequest
     public string FileName { get; set; }
     public string ViewName { get; set; }
     public string SignerEmail { get; set; }
+    public string SignerName { get; set; } // optional; Docusign falls back to the email
 }
 
 public class UploadRequest
@@ -26,15 +27,15 @@ public class UploadRequest
 public class SignController : ControllerBase
 {
     private readonly APS _aps;
-    private readonly AdobeSign _adobeSign;
+    private readonly IESignProvider _provider;
 
-    public SignController(APS aps, AdobeSign adobeSign)
+    public SignController(APS aps, IESignProvider provider)
     {
         _aps = aps;
-        _adobeSign = adobeSign;
+        _provider = provider;
     }
 
-    // Agreements are tagged in Adobe (externalId) with the Autodesk user and the ACC item,
+    // Submissions are tagged in the e-sign service with the Autodesk user and the ACC item,
     // so each user can list their own submissions per document without any local storage
     private static string GetTag(string userId, string itemId)
     {
@@ -45,8 +46,8 @@ public class SignController : ControllerBase
     public async Task<ActionResult> SendForSignature([FromBody] SignRequest body)
     {
         var tokens = await AuthController.PrepareTokens(Request, Response, _aps);
-        var adobeTokens = await AdobeController.PrepareTokens(Request, Response, _adobeSign);
-        if (tokens == null || adobeTokens == null)
+        var esignTokens = await ESignController.PrepareTokens(Request, Response, _provider);
+        if (tokens == null || esignTokens == null)
         {
             return Unauthorized();
         }
@@ -55,9 +56,8 @@ public class SignController : ControllerBase
             ? await _aps.GetSourcePdf(body.ProjectId, body.VersionId, tokens)
             : await _aps.GetViewPdf(body.VersionId, body.DerivativeUrn, tokens);
         var name = GetBaseName(body.FileName, body.ViewName);
-        var transientDocumentId = await _adobeSign.UploadTransientDocument(adobeTokens, pdf, name + ".pdf");
-        // The logged-in Autodesk user is CC'd, so Adobe notifies them on send and on completion
-        var agreementId = await _adobeSign.CreateAgreement(adobeTokens, transientDocumentId, name, body.SignerEmail, GetTag(profile.Sub, body.ItemId), profile.Email);
+        // The logged-in Autodesk user is CC'd, so they are notified on send and on completion
+        var agreementId = await _provider.SendForSignature(esignTokens, pdf, name, body.SignerEmail, body.SignerName, GetTag(profile.Sub, body.ItemId), profile.Email);
         return Ok(new { agreementId });
     }
 
@@ -66,22 +66,30 @@ public class SignController : ControllerBase
     public async Task<ActionResult> ListSubmissions([FromQuery] string itemId)
     {
         var tokens = await AuthController.PrepareTokens(Request, Response, _aps);
-        var adobeTokens = await AdobeController.PrepareTokens(Request, Response, _adobeSign);
-        if (tokens == null || adobeTokens == null)
+        var esignTokens = await ESignController.PrepareTokens(Request, Response, _provider);
+        if (tokens == null || esignTokens == null)
         {
             return Unauthorized();
         }
         var profile = await _aps.GetUserProfile(tokens);
         try
         {
-            var agreements = await _adobeSign.ListAgreements(adobeTokens, GetTag(profile.Sub, itemId));
+            var submissions = await _provider.ListSubmissions(esignTokens, GetTag(profile.Sub, itemId));
             return Ok(
-                from agreement in agreements
-                orderby agreement.Date descending
-                select new { agreementId = agreement.Id, name = agreement.Name, status = agreement.Status, date = agreement.Date }
+                from submission in submissions
+                orderby submission.Date descending
+                select new
+                {
+                    agreementId = submission.Id,
+                    name = submission.Name,
+                    status = submission.Status,
+                    date = submission.Date,
+                    isSigned = submission.IsSigned,
+                    isFinal = submission.IsFinal
+                }
             );
         }
-        catch (AdobeSignThrottledException ex)
+        catch (ESignThrottledException ex)
         {
             // Let the client back off instead of failing
             return StatusCode(429, new { retryAfter = ex.RetryAfter });
@@ -92,27 +100,56 @@ public class SignController : ControllerBase
     public async Task<ActionResult> UploadSignedPdf(string agreementId, [FromBody] UploadRequest body)
     {
         var tokens = await AuthController.PrepareTokens(Request, Response, _aps);
-        var adobeTokens = await AdobeController.PrepareTokens(Request, Response, _adobeSign);
-        if (tokens == null || adobeTokens == null)
+        var esignTokens = await ESignController.PrepareTokens(Request, Response, _provider);
+        if (tokens == null || esignTokens == null)
         {
             return Unauthorized();
         }
-        var profile = await _aps.GetUserProfile(tokens);
-        var agreement = await _adobeSign.GetAgreement(adobeTokens, agreementId);
-        // Only the user who submitted the agreement for this item may save it
-        if (agreement.ExternalId != GetTag(profile.Sub, body.ItemId))
+        var (submission, error) = await GetSignedSubmission(tokens, esignTokens, agreementId, body.ItemId);
+        if (error != null)
         {
-            return StatusCode(403, "This agreement was not submitted by you for this document.");
+            return error;
         }
-        if (agreement.Status != "SIGNED")
-        {
-            return BadRequest($"Agreement is not signed yet (status: {agreement.Status}).");
-        }
-        var pdf = await _adobeSign.GetCombinedDocument(adobeTokens, agreementId);
+        var pdf = await _provider.GetSignedPdf(esignTokens, agreementId);
         // Timestamp keeps the name unique, so we always create a new item
-        var name = $"{agreement.Name} - signed {DateTime.UtcNow:yyyyMMdd-HHmmss}.pdf";
-        var itemId = await _aps.UploadSignedPdf(body.ProjectId, body.ItemId, name, pdf, tokens);
-        return Ok(new { itemId, name });
+        var name = $"{submission.Name} - signed {DateTime.UtcNow:yyyyMMdd-HHmmss}.pdf";
+        var (itemId, fileName) = await _aps.UploadSignedPdf(body.ProjectId, body.ItemId, name, pdf, tokens);
+        return Ok(new { itemId, name = fileName });
+    }
+
+    // The signed PDF as a file download
+    [HttpGet("{agreementId}/download")]
+    public async Task<ActionResult> DownloadSignedPdf(string agreementId, [FromQuery] string itemId)
+    {
+        var tokens = await AuthController.PrepareTokens(Request, Response, _aps);
+        var esignTokens = await ESignController.PrepareTokens(Request, Response, _provider);
+        if (tokens == null || esignTokens == null)
+        {
+            return Unauthorized();
+        }
+        var (submission, error) = await GetSignedSubmission(tokens, esignTokens, agreementId, itemId);
+        if (error != null)
+        {
+            return error;
+        }
+        var pdf = await _provider.GetSignedPdf(esignTokens, agreementId);
+        return File(pdf, "application/pdf", $"{submission.Name} - signed.pdf");
+    }
+
+    // Only the user who submitted it for this item may get the signed PDF, and only once it's signed
+    private async Task<(Submission, ActionResult)> GetSignedSubmission(Tokens tokens, ESignTokens esignTokens, string agreementId, string itemId)
+    {
+        var profile = await _aps.GetUserProfile(tokens);
+        var submission = await _provider.GetSubmission(esignTokens, agreementId);
+        if (submission.Tag != GetTag(profile.Sub, itemId))
+        {
+            return (null, StatusCode(403, "This agreement was not submitted by you for this document."));
+        }
+        if (!submission.IsSigned)
+        {
+            return (null, BadRequest($"Agreement is not signed yet (status: {submission.Status})."));
+        }
+        return (submission, null);
     }
 
     private static string GetBaseName(string fileName, string viewName)

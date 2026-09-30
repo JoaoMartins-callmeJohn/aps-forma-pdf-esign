@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -64,7 +65,7 @@ public class HubsController : ControllerBase
         }
         else
         {
-            var contents = await _aps.GetFolderContents(project, folder_id, tokens);
+            var (contents, tipVersions) = await _aps.GetFolderContents(project, folder_id, tokens);
             var folders = from entry in contents
                 where entry is FolderData
                 select entry as FolderData into folder
@@ -72,10 +73,17 @@ public class HubsController : ControllerBase
             var items = from entry in contents
                 where entry is ItemData
                 select entry as ItemData into item
-                where SupportedExtensions.Any(ext => item.Attributes.DisplayName.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                where IsSupported(item, tipVersions.GetValueOrDefault(item.Id))
                 select new { id = item.Id, name = item.Attributes.DisplayName, folder = false };
             return Ok(folders.Concat(items));
         }
+    }
+
+    // By the file name of the item or of its tip version, since the item may be renamed without its extension
+    private static bool IsSupported(ItemData item, VersionData tipVersion)
+    {
+        return new[] { item.Attributes.DisplayName, tipVersion?.Attributes.Name }
+            .Any(name => name != null && SupportedExtensions.Any(ext => name.EndsWith(ext, StringComparison.OrdinalIgnoreCase)));
     }
 
     [HttpGet("{hub}/projects/{project}/users")]

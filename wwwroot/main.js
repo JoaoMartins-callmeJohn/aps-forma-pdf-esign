@@ -8,17 +8,15 @@ const signer = document.getElementById('signer');
 const signerEmail = document.getElementById('signer-email');
 const send = document.getElementById('send');
 const status = document.getElementById('status');
-const adobe = document.getElementById('adobe');
+const esign = document.getElementById('esign');
 const submissionsList = document.getElementById('submissions-list');
 
-// Acrobat Sign throttles repeated identical requests (3 per 3 minutes on developer accounts),
-// so poll slowly and back off when asked
-const POLLING_INTERVAL = 60;
-// No further status changes expected
-const FINAL_STATUSES = ['SIGNED', 'CANCELLED', 'EXPIRED', 'ARCHIVED'];
+// Set by the server: e-sign services throttle status checks (Adobe: 60s, Docusign: 15 min), so poll slowly and back off when asked
+let pollingInterval = 60;
 
 let selection = null; // { hubId, projectId, itemId, versionId, itemName }
-let adobeConnected = false;
+let esignConnected = false;
+let esignProvider = 'e-sign';
 let polling = null;
 const projectUsers = new Map(); // projectId -> [{ name, email }] or null when the list is not available
 
@@ -50,7 +48,7 @@ async function loadSigners(hubId, projectId) {
             projectUsers.set(projectId, null);
         }
     }
-    if (selection?.projectId !== projectId || !adobeConnected) {
+    if (selection?.projectId !== projectId || !esignConnected) {
         return;
     }
     const users = projectUsers.get(projectId);
@@ -67,6 +65,12 @@ async function loadSigners(hubId, projectId) {
 
 function getSignerEmail() {
     return signer.style.display === 'none' ? signerEmail.value : signer.value;
+}
+
+// Only known when picked from the project users (Docusign requires a name and falls back to the email)
+function getSignerName() {
+    const email = getSignerEmail();
+    return projectUsers.get(selection.projectId)?.find(user => user.email === email)?.name || null;
 }
 
 function renderSubmissions(submissions) {
@@ -86,11 +90,14 @@ function renderSubmissions(submissions) {
         const info = document.createElement('span');
         info.innerText = `${submission.status}` + (submission.date ? ` · ${new Date(submission.date).toLocaleString()}` : '');
         details.appendChild(info);
-        if (submission.status === 'SIGNED') {
+        if (submission.isSigned) {
+            const download = document.createElement('button');
+            download.innerText = 'Download';
+            download.onclick = () => downloadSignedPdf(submission.agreementId, download);
             const save = document.createElement('button');
             save.innerText = 'Save to Forma';
             save.onclick = () => uploadSignedPdf(submission.agreementId, save);
-            details.appendChild(save);
+            details.append(download, save);
         }
         row.append(name, details);
         submissionsList.appendChild(row);
@@ -104,8 +111,8 @@ async function refreshSubmissions() {
     if (!selection) {
         return;
     }
-    if (!adobeConnected) {
-        submissionsList.innerText = 'Connect Adobe Sign to see your submissions.';
+    if (!esignConnected) {
+        submissionsList.innerText = `Connect ${esignProvider} to see your submissions.`;
         return;
     }
     const itemId = selection.itemId;
@@ -117,19 +124,19 @@ async function refreshSubmissions() {
         }
         if (resp.status === 429) {
             const { retryAfter } = await resp.json();
-            next = Math.max(retryAfter + 1, POLLING_INTERVAL);
+            next = Math.max(retryAfter + 1, pollingInterval);
         } else if (!resp.ok) {
             throw new Error(await resp.text());
         } else {
             const submissions = await resp.json();
             renderSubmissions(submissions);
-            if (submissions.some(s => !FINAL_STATUSES.includes(s.status))) {
-                next = POLLING_INTERVAL;
+            if (submissions.some(s => !s.isFinal)) {
+                next = pollingInterval;
             }
         }
     } catch (err) {
         console.error(err);
-        next = POLLING_INTERVAL;
+        next = pollingInterval;
     }
     if (next && selection?.itemId === itemId) {
         polling = setTimeout(refreshSubmissions, next * 1000);
@@ -163,7 +170,8 @@ async function sendForSignature() {
             derivativeUrn,
             fileName: selection.itemName,
             viewName,
-            signerEmail: email
+            signerEmail: email,
+            signerName: getSignerName()
         });
         status.innerText = 'Sent';
         refreshSubmissions();
@@ -173,6 +181,29 @@ async function sendForSignature() {
         console.error(err);
     } finally {
         send.disabled = false;
+    }
+}
+
+// Downloads the signed PDF to the user's computer, named by the server
+async function downloadSignedPdf(agreementId, button) {
+    button.disabled = true;
+    try {
+        const resp = await fetch(`/api/sign/${agreementId}/download?itemId=${encodeURIComponent(selection.itemId)}`);
+        if (!resp.ok) {
+            throw new Error(await resp.text());
+        }
+        const disposition = resp.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename\*=UTF-8''([^;]+)/) || disposition.match(/filename="?([^";]+)"?/);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(await resp.blob());
+        link.download = match ? decodeURIComponent(match[1]) : 'signed.pdf';
+        link.click();
+        URL.revokeObjectURL(link.href);
+    } catch (err) {
+        alert('Could not download the signed PDF. See console for more details.');
+        console.error(err);
+    } finally {
+        button.disabled = false;
     }
 }
 
@@ -208,11 +239,15 @@ try {
                 document.body.removeChild(iframe);
             };
         }
-        // Adobe Sign is a separate OAuth login; sending and listing submissions require it
-        adobeConnected = (await (await fetch('/api/adobe/status')).json()).connected;
-        if (!adobeConnected) {
-            adobe.style.display = 'inline';
-            adobe.onclick = () => window.location.replace('/api/adobe/login');
+        // The e-sign service is a separate OAuth login; sending and listing submissions require it
+        const esignStatus = await (await fetch('/api/esign/status')).json();
+        esignConnected = esignStatus.connected;
+        esignProvider = esignStatus.provider;
+        pollingInterval = esignStatus.pollingInterval;
+        if (!esignConnected) {
+            esign.innerText = `Connect ${esignProvider}`;
+            esign.style.display = 'inline';
+            esign.onclick = () => window.location.replace('/api/esign/login');
             signer.style.display = send.style.display = 'none';
         }
         const viewer = await initViewer(document.getElementById('preview'));

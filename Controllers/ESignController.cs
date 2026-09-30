@@ -1,49 +1,55 @@
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
-// Adobe Acrobat Sign OAuth, mirroring AuthController (tokens are kept in cookies)
+// OAuth with the configured e-sign provider, mirroring AuthController (tokens are kept in cookies)
 [ApiController]
 [Route("api/[controller]")]
-public class AdobeController : ControllerBase
+public class ESignController : ControllerBase
 {
-    private readonly AdobeSign _adobeSign;
+    private readonly IESignProvider _provider;
 
-    public AdobeController(AdobeSign adobeSign)
+    public ESignController(IESignProvider provider)
     {
-        _adobeSign = adobeSign;
+        _provider = provider;
     }
 
-    public static async Task<AdobeTokens> PrepareTokens(HttpRequest request, HttpResponse response, AdobeSign adobeSign)
+    public static async Task<ESignTokens> PrepareTokens(HttpRequest request, HttpResponse response, IESignProvider provider)
     {
-        if (!request.Cookies.ContainsKey("adobe_refresh_token"))
+        // Tokens from another provider (e.g. after switching ESIGN_PROVIDER) mean "not connected"
+        if (!request.Cookies.ContainsKey("esign_refresh_token") || request.Cookies["esign_provider"] != provider.Name)
         {
             return null;
         }
-        var tokens = new AdobeTokens
+        var tokens = new ESignTokens
         {
-            AccessToken = request.Cookies["adobe_access_token"],
-            RefreshToken = request.Cookies["adobe_refresh_token"],
-            ApiAccessPoint = request.Cookies["adobe_api_access_point"],
-            ExpiresAt = DateTime.Parse(request.Cookies["adobe_expires_at"], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
+            AccessToken = request.Cookies["esign_access_token"],
+            RefreshToken = request.Cookies["esign_refresh_token"],
+            BaseUri = request.Cookies["esign_base_uri"],
+            AccountId = request.Cookies["esign_account_id"],
+            ExpiresAt = DateTime.Parse(request.Cookies["esign_expires_at"], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
         };
         if (tokens.ExpiresAt < DateTime.UtcNow)
         {
-            tokens = await adobeSign.RefreshTokens(tokens);
-            SetTokenCookies(response, tokens);
+            // Docusign also returns a new refresh token here, so all cookies are rewritten
+            tokens = await provider.RefreshTokens(tokens);
+            SetTokenCookies(response, provider, tokens);
         }
         return tokens;
     }
 
-    private static void SetTokenCookies(HttpResponse response, AdobeTokens tokens)
+    private static void SetTokenCookies(HttpResponse response, IESignProvider provider, ESignTokens tokens)
     {
-        response.Cookies.Append("adobe_access_token", tokens.AccessToken);
-        response.Cookies.Append("adobe_refresh_token", tokens.RefreshToken);
-        response.Cookies.Append("adobe_api_access_point", tokens.ApiAccessPoint);
-        response.Cookies.Append("adobe_expires_at", tokens.ExpiresAt.ToString("o"));
+        response.Cookies.Append("esign_provider", provider.Name);
+        response.Cookies.Append("esign_access_token", tokens.AccessToken);
+        response.Cookies.Append("esign_refresh_token", tokens.RefreshToken);
+        response.Cookies.Append("esign_base_uri", tokens.BaseUri);
+        response.Cookies.Append("esign_account_id", tokens.AccountId ?? "");
+        response.Cookies.Append("esign_expires_at", tokens.ExpiresAt.ToString("o"));
     }
 
     [HttpGet("login")]
@@ -51,49 +57,53 @@ public class AdobeController : ControllerBase
     {
         // Random state, checked in the callback to prevent CSRF
         var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
-        Response.Cookies.Append("adobe_state", state);
-        return Redirect(_adobeSign.GetAuthorizationURL(state));
+        Response.Cookies.Append("esign_state", state);
+        return Redirect(_provider.GetAuthorizationURL(state));
     }
 
     [HttpGet("logout")]
     public ActionResult Logout()
     {
-        Response.Cookies.Delete("adobe_access_token");
-        Response.Cookies.Delete("adobe_refresh_token");
-        Response.Cookies.Delete("adobe_api_access_point");
-        Response.Cookies.Delete("adobe_expires_at");
+        Response.Cookies.Delete("esign_provider");
+        Response.Cookies.Delete("esign_access_token");
+        Response.Cookies.Delete("esign_refresh_token");
+        Response.Cookies.Delete("esign_base_uri");
+        Response.Cookies.Delete("esign_account_id");
+        Response.Cookies.Delete("esign_expires_at");
         return Redirect("/");
     }
 
     [HttpGet("callback")]
-    public async Task<ActionResult> Callback(string code, string state, string api_access_point, string error, string error_description)
+    public async Task<ActionResult> Callback(string code, string state, string error, string error_description)
     {
         if (!string.IsNullOrEmpty(error))
         {
-            return BadRequest($"Adobe Sign authorization failed: {error} {error_description}");
+            return BadRequest($"{_provider.Name} authorization failed: {error} {error_description}");
         }
-        if (string.IsNullOrEmpty(state) || state != Request.Cookies["adobe_state"])
+        if (string.IsNullOrEmpty(state) || state != Request.Cookies["esign_state"])
         {
             return BadRequest("Invalid OAuth state.");
         }
-        Response.Cookies.Delete("adobe_state");
-        var tokens = await _adobeSign.GenerateTokens(code, api_access_point);
-        SetTokenCookies(Response, tokens);
+        Response.Cookies.Delete("esign_state");
+        var query = Request.Query.ToDictionary(p => p.Key, p => p.Value.ToString());
+        var tokens = await _provider.GenerateTokens(code, query);
+        SetTokenCookies(Response, _provider, tokens);
         return Redirect("/");
     }
 
     [HttpGet("status")]
     public async Task<ActionResult> GetStatus()
     {
+        bool connected;
         try
         {
-            var tokens = await PrepareTokens(Request, Response, _adobeSign);
-            return Ok(new { connected = tokens != null });
+            connected = await PrepareTokens(Request, Response, _provider) != null;
         }
         catch (Exception)
         {
             // e.g. the refresh token expired; the user has to connect again
-            return Ok(new { connected = false });
+            connected = false;
         }
+        return Ok(new { connected, provider = _provider.Name, pollingInterval = _provider.PollingInterval });
     }
 }

@@ -102,6 +102,11 @@ body, html {
     gap: 0.5em;
 }
 
+/* Status takes the free space, so the buttons stay together on the right */
+.submission .details span {
+    flex: 1;
+}
+
 @media (max-width: 768px) {
     #sidebar {
         width: 100%;
