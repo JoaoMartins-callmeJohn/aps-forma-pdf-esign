@@ -23,6 +23,14 @@ ACC item/version → 2D view PDF (Model Derivative) → POST /transientDocuments
 → signer signs (email) → GET /agreements?externalId=… (SIGNED) → GET /agreements/{id}/combinedDocument → new item in ACC folder
 ```
 
+### Authentication and licensing
+
+The app uses two separate OAuth logins: Autodesk (APS) and Adobe Acrobat Sign. Agreements are sent as the connected Adobe user.
+
+- **Senders** need their own Acrobat Sign account with API access: Developer Edition for testing, or an enterprise plan for production. See the [Acrobat Sign API FAQ](https://helpx.adobe.com/sign/faq/api.html).
+- **Signers** don't need an Adobe account. They sign from the email link.
+- **CUSTOMER app** (as set up below): only users of the Adobe account that owns the app can connect. For users from other Adobe accounts, use a certified [PARTNER app](https://developer.adobe.com/acrobat-sign/docs/overview/techblog/tldr/partner-oauth-walkthrough). See [Create an Application Quickstart](https://developer.adobe.com/acrobat-sign/docs/overview/developer_guide/gstarted).
+
 ### How submissions are tracked
 
 The app keeps no database. Each agreement is tagged in Adobe through its `externalId` field with `{autodeskUserId}:{itemId}`. When you select a document, the app asks Adobe for the agreements with your tag (`GET /agreements?externalId=…`).
