@@ -26,11 +26,26 @@ public partial class APS
         return folders.Data;
     }
 
-    public async Task<IEnumerable<IFolderContentsData>> GetFolderContents(string projectId, string folderId, Tokens tokens)
+    // All pages of the folder contents, plus the tip version of each item (by item ID)
+    public async Task<(List<IFolderContentsData> Contents, Dictionary<string, VersionData> TipVersions)> GetFolderContents(string projectId, string folderId, Tokens tokens)
     {
         var dataManagementClient = new DataManagementClient();
-        var contents = await dataManagementClient.GetFolderContentsAsync(projectId, folderId, accessToken: tokens.InternalToken);
-        return contents.Data;
+        var contents = new List<IFolderContentsData>();
+        var tipVersions = new Dictionary<string, VersionData>();
+        for (var page = 0; ; page++)
+        {
+            var response = await dataManagementClient.GetFolderContentsAsync(projectId, folderId, pageNumber: page, pageLimit: 200, accessToken: tokens.InternalToken);
+            contents.AddRange(response.Data);
+            foreach (var version in response.Included ?? [])
+            {
+                tipVersions[version.Relationships.Item.Data.Id] = version;
+            }
+            if (response.Links?.Next == null || response.Data.Count == 0)
+            {
+                break;
+            }
+        }
+        return (contents, tipVersions);
     }
 
     public async Task<IEnumerable<VersionData>> GetVersions(string projectId, string itemId, Tokens tokens)

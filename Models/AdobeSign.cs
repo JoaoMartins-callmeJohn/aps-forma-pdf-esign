@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -8,28 +9,13 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
-public class AdobeAgreement
-{
-    public string Id { get; set; }
-    public string Name { get; set; }
-    public string Status { get; set; }
-    public string Date { get; set; }
-    public string ExternalId { get; set; }
-}
-
-public class AdobeTokens
-{
-    public string AccessToken;
-    public string RefreshToken;
-    public string ApiAccessPoint; // e.g. https://api.na1.adobesign.com/ (depends on the account's shard)
-    public DateTime ExpiresAt;
-}
-
 // Minimal wrapper around the Adobe Acrobat Sign REST API v6, authenticated with OAuth 2.0 (authorization code).
 // See https://secure.adobesign.com/public/docs/restapi/v6
-public class AdobeSign
+public class AdobeSign : IESignProvider
 {
     private const string Scopes = "agreement_read:self agreement_write:self agreement_send:self";
+    // No further status changes expected
+    private static readonly string[] FinalStatuses = { "SIGNED", "CANCELLED", "EXPIRED", "ARCHIVED" };
 
     private readonly HttpClient _httpClient = new HttpClient();
     private readonly string _clientId;
@@ -46,6 +32,11 @@ public class AdobeSign
         _shard = shard;
     }
 
+    public string Name => "Adobe Sign";
+
+    // Acrobat Sign throttles repeated identical requests (3 per 3 minutes on developer accounts)
+    public int PollingInterval => 60;
+
     public string GetAuthorizationURL(string state)
     {
         return $"https://secure.{_shard}.adobesign.com/public/oauth/v2"
@@ -55,8 +46,9 @@ public class AdobeSign
     }
 
     // The callback may include the api_access_point of the user's shard; otherwise derive it from the configured shard
-    public async Task<AdobeTokens> GenerateTokens(string code, string apiAccessPoint)
+    public async Task<ESignTokens> GenerateTokens(string code, IDictionary<string, string> callbackQuery)
     {
+        callbackQuery.TryGetValue("api_access_point", out var apiAccessPoint);
         if (string.IsNullOrEmpty(apiAccessPoint))
         {
             apiAccessPoint = $"https://api.{_shard}.adobesign.com/";
@@ -70,35 +62,43 @@ public class AdobeSign
             ["client_secret"] = _clientSecret,
             ["redirect_uri"] = _callbackUri
         });
-        return new AdobeTokens
+        return new ESignTokens
         {
             AccessToken = json.GetProperty("access_token").GetString(),
             RefreshToken = json.GetProperty("refresh_token").GetString(),
-            ApiAccessPoint = json.TryGetProperty("api_access_point", out var point) ? point.GetString() : apiAccessPoint,
+            BaseUri = json.TryGetProperty("api_access_point", out var point) ? point.GetString() : apiAccessPoint,
             ExpiresAt = DateTime.UtcNow.AddSeconds(json.GetProperty("expires_in").GetInt32())
         };
     }
 
     // The refresh response does not include a new refresh token; the existing one stays valid
-    public async Task<AdobeTokens> RefreshTokens(AdobeTokens tokens)
+    public async Task<ESignTokens> RefreshTokens(ESignTokens tokens)
     {
-        var json = await PostForm($"{tokens.ApiAccessPoint}oauth/v2/refresh", new Dictionary<string, string>
+        var json = await PostForm($"{tokens.BaseUri.TrimEnd('/')}/oauth/v2/refresh", new Dictionary<string, string>
         {
             ["grant_type"] = "refresh_token",
             ["refresh_token"] = tokens.RefreshToken,
             ["client_id"] = _clientId,
             ["client_secret"] = _clientSecret
         });
-        return new AdobeTokens
+        return new ESignTokens
         {
             AccessToken = json.GetProperty("access_token").GetString(),
             RefreshToken = tokens.RefreshToken,
-            ApiAccessPoint = tokens.ApiAccessPoint,
+            BaseUri = tokens.BaseUri,
             ExpiresAt = DateTime.UtcNow.AddSeconds(json.GetProperty("expires_in").GetInt32())
         };
     }
 
-    public async Task<string> UploadTransientDocument(AdobeTokens tokens, byte[] content, string fileName)
+    // Uploads the PDF as a transient document, then creates the agreement from it.
+    // Acrobat Sign doesn't need the signer's name.
+    public async Task<string> SendForSignature(ESignTokens tokens, byte[] pdf, string name, string signerEmail, string signerName, string tag, string ccEmail)
+    {
+        var transientDocumentId = await UploadTransientDocument(tokens, pdf, name + ".pdf");
+        return await CreateAgreement(tokens, transientDocumentId, name, signerEmail, tag, ccEmail);
+    }
+
+    private async Task<string> UploadTransientDocument(ESignTokens tokens, byte[] content, string fileName)
     {
         var file = new ByteArrayContent(content);
         file.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
@@ -114,9 +114,8 @@ public class AdobeSign
         return json.GetProperty("transientDocumentId").GetString();
     }
 
-    // externalId tags the agreement so it can be listed later (see ListAgreements).
-    // ccEmail gets an email when the agreement is sent and a copy of the signed PDF when it completes.
-    public async Task<string> CreateAgreement(AdobeTokens tokens, string transientDocumentId, string name, string signerEmail, string externalId, string ccEmail)
+    // The tag is stored in the agreement's externalId
+    private async Task<string> CreateAgreement(ESignTokens tokens, string transientDocumentId, string name, string signerEmail, string tag, string ccEmail)
     {
         var addCc = !string.IsNullOrEmpty(ccEmail) && !string.Equals(ccEmail, signerEmail, StringComparison.OrdinalIgnoreCase);
         var payload = new
@@ -130,7 +129,7 @@ public class AdobeSign
             ccs = addCc ? new[] { new { email = ccEmail } } : null,
             signatureType = "ESIGN",
             state = "IN_PROCESS",
-            externalId = new { id = externalId }
+            externalId = new { id = tag }
         };
         using var request = CreateRequest(tokens, HttpMethod.Post, "/agreements");
         request.Content = JsonContent.Create(payload, options: new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
@@ -138,28 +137,27 @@ public class AdobeSign
         return json.GetProperty("id").GetString();
     }
 
-    public async Task<AdobeAgreement> GetAgreement(AdobeTokens tokens, string agreementId)
+    public async Task<Submission> GetSubmission(ESignTokens tokens, string id)
     {
-        using var request = CreateRequest(tokens, HttpMethod.Get, $"/agreements/{agreementId}");
+        using var request = CreateRequest(tokens, HttpMethod.Get, $"/agreements/{id}");
         var json = await ReadJson(await _httpClient.SendAsync(request));
-        return new AdobeAgreement
-        {
-            Id = agreementId,
-            Name = json.GetProperty("name").GetString(),
-            Status = json.GetProperty("status").GetString(),
-            ExternalId = json.TryGetProperty("externalId", out var externalId) && externalId.TryGetProperty("id", out var id) ? id.GetString() : null
-        };
+        return CreateSubmission(
+            id,
+            json.GetProperty("name").GetString(),
+            json.GetProperty("status").GetString(),
+            null,
+            json.TryGetProperty("externalId", out var externalId) && externalId.TryGetProperty("id", out var tag) ? tag.GetString() : null);
     }
 
-    // Agreements of the connected Adobe user with the given externalId (exact, case-sensitive match).
+    // Agreements with the given externalId (exact, case-sensitive match).
     // Status here is relative to the caller, e.g. WAITING_FOR_MY_SIGNATURE when the sender is also the signer.
-    public async Task<List<AdobeAgreement>> ListAgreements(AdobeTokens tokens, string externalId)
+    public async Task<List<Submission>> ListSubmissions(ESignTokens tokens, string tag)
     {
-        var agreements = new List<AdobeAgreement>();
+        var submissions = new List<Submission>();
         string cursor = null;
         do
         {
-            var path = $"/agreements?externalId={Uri.EscapeDataString(externalId)}&pageSize=100"
+            var path = $"/agreements?externalId={Uri.EscapeDataString(tag)}&pageSize=100"
                 + (cursor != null ? $"&cursor={Uri.EscapeDataString(cursor)}" : "");
             using var request = CreateRequest(tokens, HttpMethod.Get, path);
             var json = await ReadJson(await _httpClient.SendAsync(request));
@@ -170,32 +168,43 @@ public class AdobeSign
             }
             foreach (var agreement in list.EnumerateArray())
             {
-                agreements.Add(new AdobeAgreement
-                {
-                    Id = agreement.GetProperty("id").GetString(),
-                    Name = agreement.GetProperty("name").GetString(),
-                    Status = agreement.GetProperty("status").GetString(),
-                    Date = agreement.TryGetProperty("displayDate", out var date) ? date.GetString() : null,
-                    ExternalId = externalId
-                });
+                submissions.Add(CreateSubmission(
+                    agreement.GetProperty("id").GetString(),
+                    agreement.GetProperty("name").GetString(),
+                    agreement.GetProperty("status").GetString(),
+                    agreement.TryGetProperty("displayDate", out var date) ? date.GetString() : null,
+                    tag));
             }
             cursor = json.TryGetProperty("page", out var page) && page.TryGetProperty("nextCursor", out var next) ? next.GetString() : null;
         } while (!string.IsNullOrEmpty(cursor));
-        return agreements;
+        return submissions;
     }
 
-    // The signed PDF, with the audit report appended
-    public async Task<byte[]> GetCombinedDocument(AdobeTokens tokens, string agreementId)
+    public async Task<byte[]> GetSignedPdf(ESignTokens tokens, string id)
     {
-        using var request = CreateRequest(tokens, HttpMethod.Get, $"/agreements/{agreementId}/combinedDocument?attachAuditReport=true");
+        using var request = CreateRequest(tokens, HttpMethod.Get, $"/agreements/{id}/combinedDocument?attachAuditReport=true");
         var response = await _httpClient.SendAsync(request);
         await EnsureSuccess(response);
         return await response.Content.ReadAsByteArrayAsync();
     }
 
-    private static HttpRequestMessage CreateRequest(AdobeTokens tokens, HttpMethod method, string path)
+    private static Submission CreateSubmission(string id, string name, string status, string date, string tag)
     {
-        var request = new HttpRequestMessage(method, $"{tokens.ApiAccessPoint.TrimEnd('/')}/api/rest/v6{path}");
+        return new Submission
+        {
+            Id = id,
+            Name = name,
+            Status = status,
+            Date = date,
+            Tag = tag,
+            IsSigned = status == "SIGNED",
+            IsFinal = FinalStatuses.Contains(status)
+        };
+    }
+
+    private static HttpRequestMessage CreateRequest(ESignTokens tokens, HttpMethod method, string path)
+    {
+        var request = new HttpRequestMessage(method, $"{tokens.BaseUri.TrimEnd('/')}/api/rest/v6{path}");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
         return request;
     }
@@ -216,25 +225,15 @@ public class AdobeSign
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync();
-            var message = $"Acrobat Sign request failed ({(int)response.StatusCode}): {body}";
+            var message = $"Acrobat Sign request failed ({(int)response.StatusCode}, {response.RequestMessage?.RequestUri}): {body}";
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
             {
                 // Throttled (e.g. THROTTLING_TOO_FREQUENT_POLLING); the body says how long to wait
                 var retryAfter = 60;
                 try { retryAfter = JsonDocument.Parse(body).RootElement.GetProperty("retryAfter").GetInt32(); } catch (Exception) { }
-                throw new AdobeSignThrottledException(message, retryAfter);
+                throw new ESignThrottledException(message, retryAfter);
             }
             throw new HttpRequestException(message, null, response.StatusCode);
         }
-    }
-}
-
-public class AdobeSignThrottledException : HttpRequestException
-{
-    public int RetryAfter { get; }
-
-    public AdobeSignThrottledException(string message, int retryAfter) : base(message, null, HttpStatusCode.TooManyRequests)
-    {
-        RetryAfter = retryAfter;
     }
 }

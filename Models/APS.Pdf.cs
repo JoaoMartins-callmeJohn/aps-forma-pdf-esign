@@ -58,9 +58,11 @@ public partial class APS
         return memory.ToArray();
     }
 
-    // Uploads a PDF as a new item in the same folder as the given item
-    public async Task<string> UploadSignedPdf(string projectId, string itemId, string fileName, byte[] content, Tokens tokens)
+    // Uploads a PDF as a new item in the same folder as the given item.
+    // Returns the item ID and the file name actually used.
+    public async Task<(string ItemId, string FileName)> UploadSignedPdf(string projectId, string itemId, string fileName, byte[] content, Tokens tokens)
     {
+        fileName = GetValidFileName(fileName);
         var dataManagementClient = new DataManagementClient();
         var parent = await dataManagementClient.GetItemParentFolderAsync(projectId, itemId, accessToken: tokens.InternalToken);
         var folderId = parent.Data.Id;
@@ -133,7 +135,15 @@ public partial class APS
                 }
             ]
         }, accessToken: tokens.InternalToken);
-        return item.Data.Id;
+        return (item.Data.Id, fileName);
+    }
+
+    // ACC rejects file names with \ / : * ? " < > | or control characters ("Invalid characters in file name"),
+    // which view and sheet names often contain
+    private static string GetValidFileName(string fileName)
+    {
+        var chars = fileName.Select(c => "\\/:*?\"<>|".Contains(c) || char.IsControl(c) ? '_' : c).ToArray();
+        return new string(chars).Trim();
     }
 
     // "urn:adsk.objects:os.object:{bucketKey}/{objectKey}"
