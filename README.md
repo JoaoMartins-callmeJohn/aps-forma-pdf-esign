@@ -65,7 +65,6 @@ These derivatives only exist in some cases:
 If the current view has no PDF derivative, the app shows an error.
 
 > **Alternative, not implemented:** the [ACC Export PDF API](https://aps.autodesk.com/blog/acc-api-export-2d-view-and-sheet-revit-or-dwg-pdf) can burn ACC markups into the PDFs. It is not used here because:
-> - It works only in ACC (not BIM 360).
 > - It is asynchronous and needs polling.
 > - It exports every view of the file as a ZIP, so the current view has to be matched by name.
 >
@@ -77,7 +76,7 @@ If the current view has no PDF derivative, the app shows an error.
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - **APS app:** create one on [APS](https://aps.autodesk.com/myapps) with the callback URL `https://localhost:8080/api/auth/callback`, and [provision it](https://aps.autodesk.com/en/docs/bim360/v1/tutorials/getting-started/manage-access-to-docs/) in your ACC account.
-- **Project users:** the signer dropdown uses the [ACC Admin project users API](https://aps.autodesk.com/en/docs/acc/v1/reference/http/admin-projectsprojectId-users-GET/). The docs don't say whether plain project members may call it, and it may require project admin rights. If the list can't be loaded, the app shows an email text box instead.
+- **Project users:** the signer dropdown uses the [ACC Admin project users API](https://aps.autodesk.com/en/docs/acc/v1/reference/http/admin-projectsprojectId-users-GET/), and it may require project admin rights. If the list can't be loaded, the app shows an email text box instead.
 - **Trusted HTTPS certificate:** the e-sign services require an HTTPS redirect URI, so the app runs on `https://localhost:8080`. Trust the .NET development certificate once with `dotnet dev-certs https --trust`.
 - An account and API application for the e-sign service you use (below).
 
