@@ -20,18 +20,20 @@ public class Startup
         var clientID = Configuration["APS_CLIENT_ID"];
         var clientSecret = Configuration["APS_CLIENT_SECRET"];
         var callbackURL = Configuration["APS_CALLBACK_URL"];
-        var adobeSignKey = Configuration["ADOBE_SIGN_INTEGRATION_KEY"];
-        var adobeSignApiBase = Configuration["ADOBE_SIGN_API_BASE"];
+        var adobeClientID = Configuration["ADOBE_SIGN_CLIENT_ID"];
+        var adobeClientSecret = Configuration["ADOBE_SIGN_CLIENT_SECRET"];
+        var adobeCallbackURL = Configuration["ADOBE_SIGN_CALLBACK_URL"];
+        var adobeShard = Configuration["ADOBE_SIGN_SHARD"] ?? "na1";
         if (string.IsNullOrEmpty(clientID) || string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(callbackURL))
         {
             throw new ApplicationException("Missing required environment variables APS_CLIENT_ID, APS_CLIENT_SECRET, or APS_CALLBACK_URL.");
         }
-        if (string.IsNullOrEmpty(adobeSignKey))
+        if (string.IsNullOrEmpty(adobeClientID) || string.IsNullOrEmpty(adobeClientSecret) || string.IsNullOrEmpty(adobeCallbackURL))
         {
-            throw new ApplicationException("Missing required environment variable ADOBE_SIGN_INTEGRATION_KEY.");
+            throw new ApplicationException("Missing required environment variables ADOBE_SIGN_CLIENT_ID, ADOBE_SIGN_CLIENT_SECRET, or ADOBE_SIGN_CALLBACK_URL.");
         }
         services.AddSingleton(new APS(clientID, clientSecret, callbackURL));
-        services.AddSingleton(new AdobeSign(adobeSignKey, adobeSignApiBase));
+        services.AddSingleton(new AdobeSign(adobeClientID, adobeClientSecret, adobeCallbackURL, adobeShard));
     }
 
     public void Configure(IApplicationBuilder app, IWebHostEnvironment env)

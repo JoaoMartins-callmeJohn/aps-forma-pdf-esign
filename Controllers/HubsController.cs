@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Autodesk.DataManagement.Model;
 using Microsoft.AspNetCore.Mvc;
@@ -74,6 +75,29 @@ public class HubsController : ControllerBase
                 where SupportedExtensions.Any(ext => item.Attributes.DisplayName.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
                 select new { id = item.Id, name = item.Attributes.DisplayName, folder = false };
             return Ok(folders.Concat(items));
+        }
+    }
+
+    [HttpGet("{hub}/projects/{project}/users")]
+    public async Task<ActionResult> ListProjectUsers(string hub, string project)
+    {
+        var tokens = await AuthController.PrepareTokens(Request, Response, _aps);
+        if (tokens == null)
+        {
+            return Unauthorized();
+        }
+        try
+        {
+            return Ok(
+                from user in await _aps.GetProjectUsers(project, tokens)
+                where !string.IsNullOrEmpty(user.Email)
+                select new { name = user.Name, email = user.Email }
+            );
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode != null)
+        {
+            // e.g. 403 when the user may not list project members; the UI falls back to a text input
+            return StatusCode((int)ex.StatusCode, ex.Message);
         }
     }
 

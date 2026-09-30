@@ -23,7 +23,8 @@ body, html {
     left: 0;
     top: 3em;
     bottom: 0;
-    overflow-y: scroll;
+    display: flex;
+    flex-direction: column;
 }
 
 #preview {
@@ -56,17 +57,49 @@ body, html {
     font-family: ArtifaktElement;
 }
 
-#views {
-    max-width: 20em;
-}
-
 #status {
     height: auto;
     font-style: italic;
 }
 
+#views, #signer {
+    max-width: 20em;
+}
+
 #tree {
+    flex: 1;
+    overflow-y: auto;
     margin: 0.5em;
+}
+
+#submissions {
+    height: 35%;
+    overflow-y: auto;
+    border-top: 1px solid #ddd;
+    padding: 0.5em;
+    font-size: 0.9em;
+}
+
+.submissions-title {
+    font-weight: bold;
+    margin-bottom: 0.5em;
+}
+
+.submission {
+    padding: 0.4em 0;
+    border-bottom: 1px solid #eee;
+}
+
+.submission .name {
+    word-break: break-word;
+}
+
+.submission .details {
+    color: #666;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5em;
 }
 
 @media (max-width: 768px) {

@@ -17,15 +17,20 @@
         <span class="title">PDF eSign</span>
         <div id="toolbar" style="visibility: hidden;">
             <select id="views" title="2D views"></select>
-            <input id="signer" type="email" placeholder="Signer email">
+            <button id="adobe" style="display: none;">Connect Adobe Sign</button>
+            <select id="signer" title="Signer (project users)"></select>
+            <input id="signer-email" type="email" placeholder="Signer email" style="display: none;">
             <button id="send">Send for signature</button>
             <span id="status"></span>
-            <button id="upload" style="display: none;">Save signed PDF to ACC</button>
         </div>
         <button id="login" style="visibility: hidden;">Login</button>
     </div>
     <div id="sidebar">
         <div id="tree"></div>
+        <div id="submissions" style="display: none;">
+            <div class="submissions-title">My submissions</div>
+            <div id="submissions-list"></div>
+        </div>
     </div>
     <div id="preview"></div>
     <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.js"></script>

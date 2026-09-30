@@ -5,13 +5,22 @@ const login = document.getElementById('login');
 const toolbar = document.getElementById('toolbar');
 const views = document.getElementById('views');
 const signer = document.getElementById('signer');
+const signerEmail = document.getElementById('signer-email');
 const send = document.getElementById('send');
 const status = document.getElementById('status');
-const upload = document.getElementById('upload');
+const adobe = document.getElementById('adobe');
+const submissionsList = document.getElementById('submissions-list');
+
+// Acrobat Sign throttles repeated identical requests (3 per 3 minutes on developer accounts),
+// so poll slowly and back off when asked
+const POLLING_INTERVAL = 60;
+// No further status changes expected
+const FINAL_STATUSES = ['SIGNED', 'CANCELLED', 'EXPIRED', 'ARCHIVED'];
 
 let selection = null; // { hubId, projectId, itemId, versionId, itemName }
-let agreement = null; // { id, fileName, viewName, projectId, itemId }
+let adobeConnected = false;
 let polling = null;
+const projectUsers = new Map(); // projectId -> [{ name, email }] or null when the list is not available
 
 function isPdf(name) {
     return name.toLowerCase().endsWith('.pdf');
@@ -26,27 +35,104 @@ async function postJSON(url, body) {
     return resp.json();
 }
 
-function resetAgreement() {
-    clearInterval(polling);
-    agreement = null;
-    status.innerText = '';
-    upload.style.display = 'none';
+// Signer dropdown with the project users; falls back to a text input
+// when the list can't be loaded (e.g. the user may not list project members)
+async function loadSigners(hubId, projectId) {
+    if (!projectUsers.has(projectId)) {
+        try {
+            const resp = await fetch(`/api/hubs/${hubId}/projects/${projectId}/users`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            projectUsers.set(projectId, await resp.json());
+        } catch (err) {
+            console.error('Could not load project users, falling back to email input.', err);
+            projectUsers.set(projectId, null);
+        }
+    }
+    if (selection?.projectId !== projectId || !adobeConnected) {
+        return;
+    }
+    const users = projectUsers.get(projectId);
+    signer.innerHTML = '';
+    if (users && users.length > 0) {
+        users.forEach(user => signer.add(new Option(`${user.name} (${user.email})`, user.email)));
+        signer.style.display = 'inline';
+        signerEmail.style.display = 'none';
+    } else {
+        signer.style.display = 'none';
+        signerEmail.style.display = 'inline';
+    }
 }
 
-async function checkStatus() {
-    try {
-        const resp = await fetch(`/api/sign/${agreement.id}`);
-        if (!resp.ok) {
-            throw new Error(await resp.text());
+function getSignerEmail() {
+    return signer.style.display === 'none' ? signerEmail.value : signer.value;
+}
+
+function renderSubmissions(submissions) {
+    submissionsList.innerHTML = '';
+    if (submissions.length === 0) {
+        submissionsList.innerText = 'No submissions for this document yet.';
+        return;
+    }
+    for (const submission of submissions) {
+        const row = document.createElement('div');
+        row.className = 'submission';
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.innerText = submission.name;
+        const details = document.createElement('div');
+        details.className = 'details';
+        const info = document.createElement('span');
+        info.innerText = `${submission.status}` + (submission.date ? ` · ${new Date(submission.date).toLocaleString()}` : '');
+        details.appendChild(info);
+        if (submission.status === 'SIGNED') {
+            const save = document.createElement('button');
+            save.innerText = 'Save to Forma';
+            save.onclick = () => uploadSignedPdf(submission.agreementId, save);
+            details.appendChild(save);
         }
-        const { status: agreementStatus } = await resp.json();
-        status.innerText = agreementStatus;
-        if (agreementStatus === 'SIGNED') {
-            clearInterval(polling);
-            upload.style.display = 'inline';
+        row.append(name, details);
+        submissionsList.appendChild(row);
+    }
+}
+
+// Lists the logged-in user's submissions for the selected document, and keeps polling
+// (slowly) while any of them may still change
+async function refreshSubmissions() {
+    clearTimeout(polling);
+    if (!selection) {
+        return;
+    }
+    if (!adobeConnected) {
+        submissionsList.innerText = 'Connect Adobe Sign to see your submissions.';
+        return;
+    }
+    const itemId = selection.itemId;
+    let next = null;
+    try {
+        const resp = await fetch(`/api/sign?itemId=${encodeURIComponent(itemId)}`);
+        if (selection?.itemId !== itemId) {
+            return; // another document was selected meanwhile
+        }
+        if (resp.status === 429) {
+            const { retryAfter } = await resp.json();
+            next = Math.max(retryAfter + 1, POLLING_INTERVAL);
+        } else if (!resp.ok) {
+            throw new Error(await resp.text());
+        } else {
+            const submissions = await resp.json();
+            renderSubmissions(submissions);
+            if (submissions.some(s => !FINAL_STATUSES.includes(s.status))) {
+                next = POLLING_INTERVAL;
+            }
         }
     } catch (err) {
         console.error(err);
+        next = POLLING_INTERVAL;
+    }
+    if (next && selection?.itemId === itemId) {
+        polling = setTimeout(refreshSubmissions, next * 1000);
     }
 }
 
@@ -55,8 +141,9 @@ async function sendForSignature() {
         alert('Select a version in the tree first.');
         return;
     }
-    if (!signer.reportValidity() || !signer.value) {
-        alert('Enter the signer email.');
+    const email = getSignerEmail();
+    if (!email || (signerEmail.style.display !== 'none' && !signerEmail.reportValidity())) {
+        alert('Choose the signer.');
         return;
     }
     // Native PDFs are sent as-is (whole file); DWG/RVT use the PDF derivative of the current 2D view
@@ -65,23 +152,21 @@ async function sendForSignature() {
         alert('This view has no PDF derivative (requires RVT 2022+ or DWG translated with the "2dviews": "pdf" option).');
         return;
     }
-    resetAgreement();
     const viewName = isPdf(selection.itemName) ? null : getCurrentViewName();
     status.innerText = 'Sending...';
     send.disabled = true;
     try {
-        const { agreementId } = await postJSON('/api/sign', {
+        await postJSON('/api/sign', {
             projectId: selection.projectId,
             itemId: selection.itemId,
             versionId: selection.versionId,
             derivativeUrn,
             fileName: selection.itemName,
             viewName,
-            signerEmail: signer.value
+            signerEmail: email
         });
-        agreement = { id: agreementId, fileName: selection.itemName, viewName, projectId: selection.projectId, itemId: selection.itemId };
         status.innerText = 'Sent';
-        polling = setInterval(checkStatus, 10000);
+        refreshSubmissions();
     } catch (err) {
         status.innerText = '';
         alert('Could not send for signature. See console for more details.');
@@ -91,21 +176,20 @@ async function sendForSignature() {
     }
 }
 
-async function uploadSignedPdf() {
-    upload.disabled = true;
+// Saves the signed PDF as a new file in the folder of the selected document
+async function uploadSignedPdf(agreementId, button) {
+    button.disabled = true;
     try {
-        const { name } = await postJSON(`/api/sign/${agreement.id}/upload`, {
-            projectId: agreement.projectId,
-            itemId: agreement.itemId,
-            fileName: agreement.fileName,
-            viewName: agreement.viewName
+        const { name } = await postJSON(`/api/sign/${agreementId}/upload`, {
+            projectId: selection.projectId,
+            itemId: selection.itemId
         });
         alert(`Signed PDF saved as "${name}".`);
     } catch (err) {
         alert('Could not save the signed PDF. See console for more details.');
         console.error(err);
     } finally {
-        upload.disabled = false;
+        button.disabled = false;
     }
 }
 
@@ -124,16 +208,27 @@ try {
                 document.body.removeChild(iframe);
             };
         }
+        // Adobe Sign is a separate OAuth login; sending and listing submissions require it
+        adobeConnected = (await (await fetch('/api/adobe/status')).json()).connected;
+        if (!adobeConnected) {
+            adobe.style.display = 'inline';
+            adobe.onclick = () => window.location.replace('/api/adobe/login');
+            signer.style.display = send.style.display = 'none';
+        }
         const viewer = await initViewer(document.getElementById('preview'));
         initTree('#tree', (version) => {
             selection = version;
-            resetAgreement();
+            status.innerText = '';
             // URL-safe base64 without padding
             const urn = window.btoa(version.versionId).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
             loadModel(viewer, urn, views);
+            loadSigners(version.hubId, version.projectId);
+            submissionsList.innerText = 'Loading...';
+            refreshSubmissions();
         });
+        submissionsList.innerText = 'Select a document version to see your submissions.';
+        document.getElementById('submissions').style.display = 'block';
         send.onclick = sendForSignature;
-        upload.onclick = uploadSignedPdf;
         toolbar.style.visibility = 'visible';
     } else {
         login.innerText = 'Login';
